@@ -1,0 +1,115 @@
+name: selfcheck
+# "Gates never reject what doctrine mandates" (v6) made operational: conducted's
+# own CI checks its shipped gates against the artifact populations they must
+# accept and reject, and its ops scripts against the shells that must run them.
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  selfcheck:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ops scripts parse under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          foreach ($f in Get-ChildItem ops/*.ps1) {
+            $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw $f.FullName), [ref]$null)
+            Write-Host "$($f.Name) parses OK under 5.1"
+          }
+      - name: ops scripts are ASCII-only
+        shell: bash
+        run: |
+          if grep -rP '[^\x00-\x7F]' ops/*.ps1; then
+            echo "non-ASCII in ops/*.ps1 - PS 5.1 reads UTF-8-no-BOM as cp1252 and dies at parse" >&2
+            exit 1
+          fi
+          echo "ops scripts ASCII-clean"
+      - name: placeholder gate fixtures (must-catch AND must-not-catch)
+        shell: bash
+        run: |
+          RE='<[A-Z][A-Z0-9_-]+>'
+          grep -qF "$RE" seed/.github/workflows/gates.yml || { echo "gates.yml placeholder regex drifted from this fixture" >&2; exit 1; }
+          for p in '<NODE-PATH>' '<TESTABLE-CLAUSE-1>' '<YYYY-MM-DD>' '<LOW>'; do
+            echo "$p" | grep -qE "$RE" || { echo "real placeholder NOT caught: $p" >&2; exit 1; }
+          done
+          for g in '<T>' '<Program>' 'List<ServerCandidate>' '<T extends ResourceRecord>' '<Widget>'; do
+            echo "$g" | grep -qE "$RE" && { echo "false positive on mandated-artifact content: $g" >&2; exit 1; }
+          done
+          for f in seed/templates/brief.md seed/templates/showcase.md seed/templates/status.json; do
+            grep -qE "$RE" "$f" || { echo "template $f no longer trips the gate it exists to trip" >&2; exit 1; }
+          done
+          echo "placeholder fixtures pass both directions"
+      - name: bookkeeping lane fixtures (in-lane AND out-of-lane, v7)
+        shell: bash
+        run: |
+          G=seed/.github/workflows/gates.yml
+          ALLOW='^docs/'
+          DENY='^docs/(VISION\.md|DECISIONS\.md|BOT\.md)$'
+          grep -qF "ALLOW='$ALLOW'" "$G" || { echo "gates.yml ALLOW regex drifted from this fixture" >&2; exit 1; }
+          grep -qF "DENY='$DENY'" "$G" || { echo "gates.yml DENY regex drifted from this fixture" >&2; exit 1; }
+          grep -q 'pull_request_target' "$G" || { echo "bookkeeping-merge must run its logic from the BASE ref (pull_request_target)" >&2; exit 1; }
+          # Reviewer model (owner ruling 2026-07-21): the clerk APPROVES pinned to the verified
+          # SHA; GitHub auto-merge lands it. The TOCTOU pin is the head-moved re-check + the
+          # commit_id-pinned review, not a merge flag (--match-head-commit died with the App's
+          # merge step — this fixture lagged it and held main red, maturity-docs PR field find).
+          grep -q 'not approving; the next run re-classifies' "$G" || { echo "approve must re-check the head SHA before reviewing (TOCTOU)" >&2; exit 1; }
+          grep -q 'commit_id="\$HEAD_SHA"' "$G" || { echo "the approval must be pinned to the verified SHA (commit_id)" >&2; exit 1; }
+          grep -q 'CONDUCTED_CLERK' "$G" || { echo "the reviewer credential must be the clerk machine user (Actions secret CONDUCTED_CLERK)" >&2; exit 1; }
+          in_lane() { [[ "$1" =~ $ALLOW && ! "$1" =~ $DENY ]]; }
+          for p in docs/wake/2026-07-20.md docs/ledger/queue-viz.md docs/ledger/ROLLUP.md \
+                   docs/field-notes/2026-07-20-x.md docs/findings/f-12.md docs/ROADMAP.md docs/CONSOLIDATION.md; do
+            in_lane "$p" || { echo "should be bookkeeping-lane but is not: $p" >&2; exit 1; }
+          done
+          for p in docs/VISION.md docs/DECISIONS.md docs/BOT.md CLAUDE.md work/x/brief.md \
+                   work/x/plan.md .github/workflows/gates.yml scripts/manifest-check.sh src/app.ts; do
+            if in_lane "$p"; then echo "must NOT be bookkeeping-lane: $p" >&2; exit 1; fi
+          done
+          echo "bookkeeping lane fixtures pass both directions"
+      - name: trailerless lane fixtures - the migration landing path (v9.1, both directions)
+        shell: bash
+        run: |
+          set -uo pipefail
+          G=seed/.github/workflows/gates.yml
+          # The literal pathspec the territory gate uses for trailerless PRs. Pinned
+          # byte-for-byte: if it drifts, this fixture must be re-argued, not silently
+          # bypassed. templates/** is IN (inert scaffolding every migration from v7
+          # onward is required to edit - a migration PR RED / its docs-only twin GREEN); .github/** and
+          # scripts/** stay OUT (the measuring apparatus - a PR must never be able to
+          # widen the gate that judges it).
+          SPEC="-- ':!docs' ':!CLAUDE.md' ':!work/*/brief.md' ':!work/*/*/brief.md' ':!templates'"
+          grep -qF -- "$SPEC" "$G" || { echo "gates.yml trailerless pathspec drifted from this fixture" >&2; exit 1; }
+          EXCL=( ':!docs' ':!CLAUDE.md' ':!work/*/brief.md' ':!work/*/*/brief.md' ':!templates' )
+          LEGAL=( docs/MIGRATIONS.md docs/ledger/n.md CLAUDE.md work/x/brief.md work/a/b/brief.md \
+                  templates/status.json templates/ledger-entry.md templates/brief.md templates/showcase.md )
+          ILLEGAL=( .github/workflows/gates.yml scripts/manifest-check.sh scripts/rollup.sh \
+                    work/x/plan.md work/x/showcase.md src/app.ts .claude/agents/evaluator.md )
+          R=$(mktemp -d); git -C "$R" init -q
+          git -C "$R" -c user.email=s@e -c user.name=s commit -q --allow-empty -m base
+          for p in "${LEGAL[@]}" "${ILLEGAL[@]}"; do
+            mkdir -p "$R/$(dirname "$p")"; printf 'x\n' > "$R/$p"
+          done
+          git -C "$R" add -A
+          # Exactly what the gate computes as NONDOCS: what survives the exclusions.
+          NONDOCS=$(git -C "$R" diff --cached --name-only HEAD -- "${EXCL[@]}")
+          for p in "${LEGAL[@]}"; do
+            grep -qxF "$p" <<< "$NONDOCS" && { echo "trailerless-LEGAL path is being rejected: $p" >&2; exit 1; }
+          done
+          for p in "${ILLEGAL[@]}"; do
+            grep -qxF "$p" <<< "$NONDOCS" || { echo "trailerless-ILLEGAL path is NOT being rejected: $p" >&2; exit 1; }
+          done
+          # templates/** is trailerless-LEGAL but must NOT have become bookkeeping-LANE:
+          # migrations still land on the owner's click (ALLOW is '^docs/').
+          [[ "templates/status.json" =~ ^docs/ ]] && { echo "templates must not enter the bookkeeping lane" >&2; exit 1; }
+          rm -rf "$R"
+          echo "trailerless lane fixtures pass both directions (templates in; gates/scripts out)"
+      - name: manifest-check glob fixtures
+        shell: bash
+        run: |
+          bash -n seed/scripts/manifest-check.sh
+          source <(sed -n '/^glob_to_regex()/,/^}/p' seed/scripts/manifest-check.sh)
+          [[ "src/a.txt" =~ $(glob_to_regex 'src/*') ]] || { echo "src/* should match src/a.txt" >&2; exit 1; }
+          [[ "src/d/e.txt" =~ $(glob_to_regex 'src/*') ]] && { echo "src/* must NOT cross segments" >&2; exit 1; }
+          [[ "src/d/e.txt" =~ $(glob_to_regex 'src/**') ]] || { echo "src/** should cross segments" >&2; exit 1; }
+          echo "glob fixtures pass"

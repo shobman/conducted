@@ -1,0 +1,201 @@
+name: gates
+on:
+  pull_request:
+    branches: [main]
+  # v7 two-lane approval: the bookkeeping-merge job runs on pull_request_target,
+  # so its logic is ALWAYS the base ref's — a PR cannot edit the lane it is
+  # judged by (the territory-law principle, applied to the workflow itself).
+  # That job executes NO PR content: it reads diff names, base-ref BOT.md, and
+  # check conclusions, then merges via the workflow-held credential.
+  pull_request_target:
+    branches: [main]
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+jobs:
+  gates:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+      - name: Project tests + lint
+        run: |
+          if [[ ! -f ./scripts/test.sh ]]; then
+            echo "no scripts/test.sh yet (pre-toolchain)"
+          elif [[ ! -x ./scripts/test.sh ]]; then
+            echo "scripts/test.sh exists but is not executable — a skipped suite must fail, not pass" >&2
+            exit 1
+          else
+            ./scripts/test.sh
+          fi
+      - name: Territory manifest check
+        run: |
+          NODE=$(git log --format=%B "origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}" | grep -oP -m1 '(?<=node: ).*' || true)
+          NODE="${NODE#work/}"
+          if [[ -z "$NODE" ]]; then
+            # Trailerless PRs may touch: docs/**, root CLAUDE.md (doctrine lands as
+            # owner-approved law PRs — the game project's ruling 2026-07-19, upstreamed),
+            # work/*/brief.md (widening deltas MUST land on base per territory law;
+            # under bot mode the owner's required approval IS the widening ruling),
+            # and templates/** (v9.1 — the migration landing path).
+            #
+            # WHY templates/** is in the set and .github/**, scripts/** are NOT:
+            # templates are INERT SCAFFOLDING — nothing executes them, no gate reads
+            # them to decide a verdict; they are copied and filled in by humans and
+            # agents. Gates and scripts are the MEASURING APPARATUS, and v6's law is
+            # that the measured party never edits its measurers' artifacts. Widening
+            # to templates cannot widen this gate; widening to .github/** or
+            # scripts/** would let a PR edit the rule that judges it. Every migration
+            # from v7 onward is REQUIRED to edit templates (v7 ledger `models:`, v8
+            # brief INTENT + showcase delta-ledger, v9 window/cash fields), so
+            # without this line "gates never reject what doctrine mandates" (v6) is
+            # violated by construction — a migration PR RED and unfixable from inside
+            # itself, its docs-only twin GREEN on the same lane. A migration
+            # that must also touch .github/** or scripts/** still needs the owner's
+            # admin lane: that is the gate-repair path, deliberately unchanged.
+            NONDOCS=$(git diff --name-only "origin/${{ github.base_ref }}...${{ github.event.pull_request.head.sha }}" -- ':!docs' ':!CLAUDE.md' ':!work/*/brief.md' ':!work/*/*/brief.md' ':!templates' || true)
+            if [[ -n "$NONDOCS" ]]; then
+              echo "no node trailer, but the diff reaches outside docs/, CLAUDE.md, brief deltas, and templates/ — omitting the trailer does not skip the territory gate:" >&2
+              echo "$NONDOCS" >&2
+              exit 1
+            fi
+            echo "no node trailer; docs/law/brief-delta/templates-only diff verified"
+          elif ! git cat-file -e "origin/${{ github.base_ref }}:work/$NODE/brief.md" 2>/dev/null; then
+            echo "node trailer '$NODE' present but work/$NODE/brief.md is not law on the base ref" >&2
+            exit 1
+          else
+            bash scripts/manifest-check.sh "$NODE" "origin/${{ github.base_ref }}"
+          fi
+      - name: Leftover template placeholders
+        run: |
+          # Scan ONLY template-derived files. Measurement documents (code-review.md,
+          # evaluations/*) quote source code verbatim and are never template-derived —
+          # scanning them made generics (<T>, List<ServerCandidate>) trip the gate and
+          # put tampering pressure on the measured party to edit its reviewers' reports
+          # (the queue app's field report 2026-07-19). Regex: 2+ chars, SCREAMING-CASE — real
+          # placeholders (<NODE-PATH>, <TESTABLE-CLAUSE-1>) match; generics do not.
+          CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...${{ github.event.pull_request.head.sha }}" -- 'work/*/brief.md' 'work/*/*/brief.md' 'work/*/plan.md' 'work/*/showcase.md' 'work/*/status.json' 'docs/ledger/**' || true)
+          FAIL=0
+          for f in $CHANGED; do
+            [[ -f "$f" ]] || continue
+            if grep -nE '<[A-Z][A-Z0-9_-]+>' "$f"; then echo "UNFILLED PLACEHOLDER in $f" >&2; FAIL=1; fi
+          done
+          exit $FAIL
+      - name: Bot-mode commit authorship (identity law)
+        run: |
+          # gh-api preflight measures API identity, not commit authorship — a git merge
+          # with the owner's git config slipped five owner-authored commits into a
+          # bot-mode node (the queue app's field report 2026-07-19). Mode + login read from the
+          # BASE ref, same principle as territory law.
+          MODE=$(git show "origin/${{ github.base_ref }}:docs/BOT.md" 2>/dev/null | grep -oP '(?<=^mode: )\S+' || echo none)
+          if [[ "$MODE" == "bot" ]]; then
+            BOT=$(git show "origin/${{ github.base_ref }}:docs/BOT.md" | grep -oP '(?<=^bot-login: )\S+' || true)
+            if [[ -n "$BOT" && "$BOT" != "<BOT-USERNAME-or-n/a>" ]]; then
+              BAD=$(git log --format='%h %an <%ae>' "origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}" | grep -vF "$BOT" || true)
+              if [[ -n "$BAD" ]]; then
+                echo "bot-mode repo: commits not authored by $BOT — the identity law requires agent commits be bot-authored (owner-authored commits in an agent PR need an explicit waiver):" >&2
+                echo "$BAD" >&2
+                exit 1
+              fi
+            fi
+          fi
+  bookkeeping-merge:
+    # Two-lane approval (doctrine v7): a trailerless, bot-authored PR whose whole
+    # diff is docs-only (minus VISION/DECISIONS/BOT.md carve-outs) lands itself
+    # when gates are green — via a credential ONLY this workflow holds. Everything
+    # else is owner lane and this job exits green as a no-op (the normal case).
+    # STANDING WARNING: this job must never check out or execute PR content —
+    # doing so under pull_request_target reopens the classic pwn-request hole.
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4   # pull_request_target default: the BASE ref
+        with: { fetch-depth: 0 }
+      - name: Classify the lane (derived from the diff, never labels)
+        id: lane
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          CONFIGURED: ${{ secrets.CONDUCTED_CLERK != '' }}
+        run: |
+          set -euo pipefail
+          echo "merge=no" >> "$GITHUB_OUTPUT"
+          owner_lane() { echo "owner lane: $1 — no auto-merge (normal case, not an error)"; exit 0; }
+          if [[ "$IS_DRAFT" != "false" ]]; then owner_lane "draft PR"; fi
+          if [[ "$CONFIGURED" != "true" ]]; then owner_lane "merge credential not configured (MIGRATIONS v7 opt-in ritual)"; fi
+          MODE=$(git show "origin/${{ github.base_ref }}:docs/BOT.md" 2>/dev/null | grep -oP '(?<=^mode: )\S+' || echo none)
+          if [[ "$MODE" != "bot" ]]; then owner_lane "mode is '$MODE', not bot"; fi
+          BOT=$(git show "origin/${{ github.base_ref }}:docs/BOT.md" | grep -oP '(?<=^bot-login: )\S+' || true)
+          if [[ -z "$BOT" || "$BOT" == "<BOT-USERNAME-or-n/a>" ]]; then owner_lane "no bot-login on base"; fi
+          if [[ "$PR_AUTHOR" != "$BOT" ]]; then owner_lane "author '$PR_AUTHOR' is not the bot"; fi
+          git fetch --no-tags origin "$HEAD_SHA"
+          if git log --format=%B "origin/${{ github.base_ref }}..$HEAD_SHA" | grep -q 'node: '; then
+            owner_lane "node-trailer PR"
+          fi
+          # The bookkeeping class: every changed path inside docs/**, minus the
+          # carve-outs — VISION (vision changes are owner-gated), DECISIONS
+          # (rulings are owner speech; the approving click IS the countersign),
+          # BOT.md (a measurer's config: the authorship gate reads it from base —
+          # the measured party must not reconfigure its measurer unattended).
+          # Root CLAUDE.md and work/*/brief.md stay trailerless-LEGAL (territory
+          # gate above) but owner-LANE: law and widening rulings keep the click.
+          # A migration's version bump touches root CLAUDE.md, so doctrine
+          # migrations are excluded by construction. selfcheck.yml pins these
+          # two literals as fixtures — keep them byte-identical.
+          ALLOW='^docs/'
+          DENY='^docs/(VISION\.md|DECISIONS\.md|BOT\.md)$'
+          DIFF=$(git diff --name-only "origin/${{ github.base_ref }}...$HEAD_SHA")
+          if [[ -z "$DIFF" ]]; then owner_lane "empty diff"; fi
+          while IFS= read -r f; do
+            if [[ ! "$f" =~ $ALLOW ]]; then owner_lane "outside docs/**: $f"; fi
+            if [[ "$f" =~ $DENY ]]; then owner_lane "carved out of the lane: $f"; fi
+          done <<< "$DIFF"
+          echo "bookkeeping-lane PR verified: trailerless, bot-authored, docs-only minus carve-outs"
+          echo "merge=yes" >> "$GITHUB_OUTPUT"
+      - name: Wait for the gates check on this exact SHA
+        if: steps.lane.outputs.merge == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 40); do
+            CONC=$(gh api "repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs?check_name=gates" \
+              --jq '[.check_runs[] | select(.name=="gates") | select(.conclusion != "skipped")] | if length==0 then "pending" else (.[0].conclusion // "pending") end')
+            if [[ "$CONC" == "success" ]]; then echo "gates green on $HEAD_SHA"; exit 0; fi
+            if [[ "$CONC" != "pending" ]]; then
+              echo "gates concluded '$CONC' on $HEAD_SHA — leaving the PR on the normal path" >&2; exit 1
+            fi
+            sleep 30
+          done
+          echo "gates still pending after 20m — leaving the PR on the normal path" >&2; exit 1
+      - name: Approve, pinned to the verified SHA (the clerk reviews; GitHub merges)
+        if: steps.lane.outputs.merge == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.CONDUCTED_CLERK }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # REVIEWER MODEL (owner ruling 2026-07-21, supersedes the bypass design):
+          # no credential in this estate can merge without review. The clerk is a dedicated
+          # machine USER (App approvals are not counted by rulesets - proven
+          # in the field); its PAT lives ONLY in Actions secrets, never sessions.
+          # The author bot authors and enables auto-merge but can never approve itself.
+          # Neither credential alone lands anything; GitHub's native auto-merge
+          # performs the merge once the recorded approval satisfies the universal
+          # review rule. TOCTOU pin: approve only while the head SHA still equals
+          # the one the lane classified - a later push gets a fresh classification,
+          # never a stale approval.
+          CURRENT=$(gh api "repos/${{ github.repository }}/pulls/$PR" --jq .head.sha)
+          if [[ "$CURRENT" != "$HEAD_SHA" ]]; then
+            echo "head moved ($CURRENT != $HEAD_SHA) since classification - not approving; the next run re-classifies" >&2
+            exit 1
+          fi
+          gh api -X POST "repos/${{ github.repository }}/pulls/$PR/reviews"             -f event=APPROVE             -f commit_id="$HEAD_SHA"             -f body="conducted-clerk mechanical review (bookkeeping lane): trailerless verified; author is the base-ref bot; every changed path inside docs/ minus VISION/DECISIONS/BOT.md carve-outs; gates concluded success on $HEAD_SHA. Approval pinned to that SHA; the merge is GitHub auto-merge, enabled by the author." >/dev/null
+          echo "bookkeeping PR #$PR approved at $HEAD_SHA - auto-merge lands it"

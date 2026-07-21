@@ -1,0 +1,23 @@
+{
+  "node": "<NODE-PATH>",
+  "phase": "briefed",
+  "phases": ["briefed", "countersigned", "planned", "building", "evaluating", "showcased", "merged", "paused", "abandoned"],
+  "dod": [
+    { "clause": "<TESTABLE-CLAUSE-1>", "passes": [], "proof": null }
+  ],
+  "evaluator": { "verdict": null, "rounds": [], "advisory": [], "transcript": null },
+  "gates": { "tests": null, "lint": null, "secret_scan": null, "manifest": null, "code_review": null },
+  "actuals": {
+    "tokens": 0,
+    "hours": 0.0,
+    "agent_count": 0,
+    "window_cost_usd": 0,
+    "cash_cost_usd": 0,
+    "models": [],
+    "sources": []
+  },
+  "window_reading": { "value": null, "observed_at": null, "source": null, "confidence": null },
+  "parked": { "reason": null, "resume_after": null },
+  "held_for_owner": [],
+  "held_for_fable": []
+}
